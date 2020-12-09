@@ -2,34 +2,41 @@ package httpdetour
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 )
 
 func ExampleDetour() {
-	detour := NewDetourChan()
+	detour := NewChan()
+	server := httptest.NewServer(detour)
+
+	go func() {
+		d := <-detour
+		defer d.Close()
+
+		d.ResponseWriter.Write([]byte("hello world"))
+	}()
+
+	resp, _ := http.Get(server.URL)
+	io.Copy(os.Stdout, resp.Body)
+
+	// Output: hello world
+}
+
+func ExampleDetourRoundTrip() {
+	detour := NewChan()
 	cli := http.Client{
 		Transport: detour,
 	}
 
-	c := make(chan struct{})
-	go func() {
-		resp, _ := cli.Get("/ping")
-		bs, _ := ioutil.ReadAll(resp.Body)
-		fmt.Println(string(bs))
-		close(c)
-	}()
+	go cli.Get("/hello-world")
 
 	el := <-detour
 
-	fmt.Println(el.Request.URL.Path)
-	rec := httptest.NewRecorder()
-	rec.Write([]byte("pong"))
-	el.Respond(rec.Result(), nil)
+	fmt.Println(el.Request.URL.String())
+	el.Close()
 
-	<-c
-	// Output:
-	// /ping
-	// pong
+	// Output: /hello-world
 }

@@ -2,49 +2,58 @@ package httpdetour
 
 import (
 	"net/http"
+	"net/http/httptest"
 )
 
-type DetourResponse struct {
-	Response *http.Response
-	Error    error
+// Exchange is the request/response pair that will be passed over a channel
+type Exchange struct {
+	Request        *http.Request
+	ResponseWriter http.ResponseWriter
+	done           chan<- bool
 }
 
-type Detour struct {
-	Request      *http.Request
-	ResponseChan chan<- DetourResponse
+// Chan is a channel of request/response pairs. It can be injected where http.Handler or http.RoundTripper is expected.
+type Chan chan *Exchange
+
+// NewChan creates a new Chan
+func NewChan() Chan {
+	return make(chan *Exchange)
 }
 
-func (r *Detour) Respond(resp *http.Response, err error) error {
-	defer close(r.ResponseChan)
-
-	select {
-	case r.ResponseChan <- DetourResponse{resp, err}:
-		return nil
-	case <-r.Request.Context().Done():
-		return r.Request.Context().Err()
-	}
-}
-
-type DetourChan chan *Detour
-
-func NewDetourChan() DetourChan {
-	return make(chan *Detour)
-}
-
-func (r DetourChan) RoundTrip(req *http.Request) (*http.Response, error) {
-	c := make(chan DetourResponse)
-	elem := Detour{req, c}
+// ServeHTTP implements the http.Handler interface
+func (r Chan) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	c := make(chan bool)
+	elem := Exchange{req, res, c}
 
 	select {
 	case r <- &elem:
 	case <-req.Context().Done():
-		return nil, req.Context().Err()
+		return
 	}
 
 	select {
-	case resp := <-c:
-		return resp.Response, resp.Error
+	case <-c:
+		return
 	case <-req.Context().Done():
-		return nil, req.Context().Err()
+		return
+	}
+}
+
+// RoundTrip implements the http.RoundTripper interface
+func (r Chan) RoundTrip(req *http.Request) (*http.Response, error) {
+	res := httptest.NewRecorder()
+	r.ServeHTTP(res, req)
+	return res.Result(), nil
+}
+
+// Close must be invoked to signal that the request has been handled
+func (r *Exchange) Close() error {
+	defer close(r.done)
+
+	select {
+	case r.done <- true:
+		return nil
+	case <-r.Request.Context().Done():
+		return r.Request.Context().Err()
 	}
 }
